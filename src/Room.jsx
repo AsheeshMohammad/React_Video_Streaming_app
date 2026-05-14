@@ -22,6 +22,13 @@ const Room = () => {
   const myVideoRef = useRef();
   const peersRef = useRef({}); // keep track of calls
 
+  // Fix: Attach local stream to video element once it renders (after loading is false)
+  useEffect(() => {
+    if (!loading && myVideoRef.current && myStream) {
+      myVideoRef.current.srcObject = myStream;
+    }
+  }, [loading, myStream]);
+
   useEffect(() => {
     // Get user media with noise cancellation
     navigator.mediaDevices.getUserMedia({ 
