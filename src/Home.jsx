@@ -9,6 +9,7 @@ const Home = () => {
   const handleCreateRoom = () => {
     // Generate a random 6-character string for room ID
     const newRoomId = Math.random().toString(36).substring(2, 8);
+    localStorage.setItem('organizer_' + newRoomId, 'true');
     navigate(`/room/${newRoomId}`);
   };
 

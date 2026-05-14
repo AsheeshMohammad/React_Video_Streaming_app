@@ -3,13 +3,30 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Peer from 'peerjs';
 import { Mic, MicOff, Video as VideoIcon, VideoOff, MonitorUp, PhoneOff, Copy, Check, Pin, PinOff } from 'lucide-react';
 
+const peerConfig = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+    ]
+  },
+  debug: 2
+};
+
 const Room = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
 
+  const [username, setUsername] = useState('');
+  const [hasJoined, setHasJoined] = useState(false);
+
   const [peer, setPeer] = useState(null);
   const [myStream, setMyStream] = useState(null);
   const [peers, setPeers] = useState({});
+  const [peerNames, setPeerNames] = useState({});
   const [isHost, setIsHost] = useState(false);
   
   const [audioEnabled, setAudioEnabled] = useState(true);
@@ -20,17 +37,20 @@ const Room = () => {
   const [pinnedId, setPinnedId] = useState(null);
 
   const myVideoRef = useRef();
-  const peersRef = useRef({}); // keep track of calls
+  const peersRef = useRef({}); 
+  const hostReconnectInterval = useRef(null);
 
-  // Fix: Attach local stream to video element once it renders (after loading is false)
+  const isOrganizer = localStorage.getItem('organizer_' + roomId) === 'true';
+
   useEffect(() => {
-    if (!loading && myVideoRef.current && myStream) {
+    if (!loading && hasJoined && myVideoRef.current && myStream) {
       myVideoRef.current.srcObject = myStream;
     }
-  }, [loading, myStream]);
+  }, [loading, hasJoined, myStream]);
 
   useEffect(() => {
-    // Get user media with noise cancellation
+    if (!hasJoined) return;
+
     navigator.mediaDevices.getUserMedia({ 
       video: true, 
       audio: {
@@ -45,7 +65,7 @@ const Room = () => {
           myVideoRef.current.srcObject = stream;
         }
         
-        initializePeer(stream);
+        initializePeer(stream, username);
       })
       .catch((err) => {
         console.error("Failed to get local stream", err);
@@ -54,83 +74,99 @@ const Room = () => {
       });
 
     return () => {
-      // Cleanup
       if (myStream) {
         myStream.getTracks().forEach(track => track.stop());
       }
       if (peer) {
         peer.destroy();
       }
+      if (hostReconnectInterval.current) {
+        clearInterval(hostReconnectInterval.current);
+      }
     };
     // eslint-disable-next-line
-  }, [roomId]);
+  }, [roomId, hasJoined]);
 
-  const initializePeer = (stream) => {
+  const initializePeer = (stream, currentUsername) => {
     const hostId = `${roomId}-host`;
     
-    const newPeer = new Peer(hostId, {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-        ]
-      },
-      debug: 2
-    });
+    if (isOrganizer) {
+      tryCreateHostPeer(hostId, stream, currentUsername);
+    } else {
+      createGuestPeer(hostId, stream, currentUsername);
+    }
+  };
+
+  const tryCreateHostPeer = (hostId, stream, currentUsername) => {
+    const newPeer = new Peer(hostId, { ...peerConfig });
 
     newPeer.on('open', (id) => {
-      console.log('Connected as Host:', id);
+      console.log('Connected as Host/Organizer:', id);
       setIsHost(true);
       setPeer(newPeer);
       setLoading(false);
-      setupPeerListeners(newPeer, stream, true);
+      setupPeerListeners(newPeer, stream, true, currentUsername);
     });
 
     newPeer.on('error', (err) => {
       if (err.type === 'unavailable-id') {
-        // Host already exists, join as guest
-        const guestPeer = new Peer({
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'stun:stun2.l.google.com:19302' },
-              { urls: 'stun:stun3.l.google.com:19302' },
-              { urls: 'stun:stun4.l.google.com:19302' },
-            ]
-          },
-          debug: 2 
-        });
-        
-        guestPeer.on('open', (id) => {
-          console.log('Connected as Guest:', id);
-          setIsHost(false);
-          setPeer(guestPeer);
-          setLoading(false);
-          setupPeerListeners(guestPeer, stream, false);
-          
-          // Call the host
-          connectToPeer(guestPeer, hostId, stream);
-        });
-
-        guestPeer.on('error', (guestErr) => {
-          console.error('Guest Peer error:', guestErr);
-          setLoading(false);
-        });
+        console.log('Host ID unavailable (likely still dropping old session). Retrying in 2s...');
+        setTimeout(() => {
+          if (!peer || peer.destroyed) {
+            tryCreateHostPeer(hostId, stream, currentUsername);
+          }
+        }, 2000);
       } else {
-        console.error('Peer error:', err);
+        console.error('Host peer error:', err);
         setLoading(false);
       }
     });
   };
 
-  const setupPeerListeners = (currentPeer, stream, isCurrentHost) => {
-    // When someone calls us, answer with our stream
+  const createGuestPeer = (hostId, stream, currentUsername) => {
+    const guestPeer = new Peer({ ...peerConfig });
+    
+    guestPeer.on('open', (id) => {
+      console.log('Connected as Guest:', id);
+      setIsHost(false);
+      setPeer(guestPeer);
+      setLoading(false);
+      setupPeerListeners(guestPeer, stream, false, currentUsername);
+      
+      // Attempt to maintain connection to host
+      maintainConnectionToHost(guestPeer, hostId, stream, currentUsername);
+    });
+
+    guestPeer.on('error', (err) => {
+      console.error('Guest Peer error:', err);
+      if (err.type === 'peer-unavailable') {
+        // The host we tried to call is offline. Allow interval to retry later.
+        if (peersRef.current[hostId]) {
+          delete peersRef.current[hostId];
+        }
+      }
+    });
+  };
+
+  const maintainConnectionToHost = (guestPeer, hostId, stream, currentUsername) => {
+    const attemptConnection = () => {
+      if (peersRef.current[hostId]) return; // Already attempting or connected
+      console.log('Attempting to connect to host...');
+      connectToPeer(guestPeer, hostId, stream, currentUsername);
+    };
+    
+    attemptConnection();
+    hostReconnectInterval.current = setInterval(attemptConnection, 3000);
+  };
+
+  const setupPeerListeners = (currentPeer, stream, isCurrentHost, currentUsername) => {
     currentPeer.on('call', (call) => {
       console.log('Receiving call from', call.peer);
+      
+      if (call.metadata && call.metadata.username) {
+        setPeerNames(prev => ({ ...prev, [call.peer]: call.metadata.username }));
+      }
+      
       call.answer(stream);
       
       call.on('stream', (userVideoStream) => {
@@ -139,27 +175,36 @@ const Room = () => {
 
       call.on('close', () => {
         removePeerStream(call.peer);
+        delete peersRef.current[call.peer];
       });
 
       peersRef.current[call.peer] = call;
     });
 
-    // We can also setup data connections to share the list of participants if we are the host
     currentPeer.on('connection', (conn) => {
       conn.on('data', (data) => {
-        if (data.type === 'new-guest' && !isCurrentHost) {
-          // Connect to the new guest
-          connectToPeer(currentPeer, data.peerId, stream);
+        if (data.type === 'user-info') {
+          setPeerNames(prev => ({ ...prev, [data.peerId]: data.username }));
         }
+        if (data.type === 'new-guest' && !isCurrentHost) {
+          connectToPeer(currentPeer, data.peerId, stream, currentUsername);
+        }
+      });
+      conn.on('open', () => {
+         conn.send({ type: 'user-info', username: currentUsername, peerId: currentPeer.id });
       });
     });
   };
 
-  const connectToPeer = (currentPeer, targetId, stream) => {
-    if (peersRef.current[targetId]) return; // already connected
+  const connectToPeer = (currentPeer, targetId, stream, currentUsername) => {
+    if (peersRef.current[targetId]) return;
 
     console.log('Calling', targetId);
-    const call = currentPeer.call(targetId, stream);
+    const call = currentPeer.call(targetId, stream, { metadata: { username: currentUsername } });
+    
+    if (!call) return; // Might happen if peer disconnected right before
+
+    peersRef.current[targetId] = call;
     
     call.on('stream', (userVideoStream) => {
       addPeerStream(targetId, userVideoStream);
@@ -167,19 +212,15 @@ const Room = () => {
 
     call.on('close', () => {
       removePeerStream(targetId);
+      delete peersRef.current[targetId];
     });
 
-    peersRef.current[targetId] = call;
-
-    // Data connection to let host know we are here
     const conn = currentPeer.connect(targetId);
-    conn.on('open', () => {
-      if (isHost) {
-        // If I am host and someone connected, tell others about this new guy (not fully implemented to keep it simple, 2-3 works well with star topology mostly but peer to peer is better)
-        // For simplicity in a 2-3 person app, we let them all talk to the host, 
-        // if we want full mesh we should broadcast peer IDs.
-      }
-    });
+    if (conn) {
+      conn.on('open', () => {
+        conn.send({ type: 'user-info', username: currentUsername, peerId: currentPeer.id });
+      });
+    }
   };
 
   const addPeerStream = (peerId, stream) => {
@@ -222,17 +263,18 @@ const Room = () => {
   };
 
   const toggleScreenShare = async () => {
+    if (!isHost) return; 
+    
     if (!isScreenSharing) {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
         const screenTrack = screenStream.getVideoTracks()[0];
         
-        // Replace video track for all peers
         if (myStream) {
           const videoTrack = myStream.getVideoTracks()[0];
           
           Object.values(peersRef.current).forEach(call => {
-            const sender = call.peerConnection.getSenders().find(s => s.track.kind === 'video');
+            const sender = call.peerConnection?.getSenders().find(s => s.track.kind === 'video');
             if (sender) {
               sender.replaceTrack(screenTrack);
             }
@@ -261,7 +303,7 @@ const Room = () => {
 
   const stopScreenSharing = (videoTrack) => {
     Object.values(peersRef.current).forEach(call => {
-      const sender = call.peerConnection.getSenders().find(s => s.track.kind === 'video');
+      const sender = call.peerConnection?.getSenders().find(s => s.track.kind === 'video');
       if (sender) {
         sender.replaceTrack(videoTrack);
       }
@@ -281,6 +323,9 @@ const Room = () => {
     if (peer) {
       peer.destroy();
     }
+    if (hostReconnectInterval.current) {
+      clearInterval(hostReconnectInterval.current);
+    }
     navigate('/');
   };
 
@@ -289,6 +334,38 @@ const Room = () => {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const handleJoin = (e) => {
+    e.preventDefault();
+    if (username.trim()) {
+      setHasJoined(true);
+    }
+  };
+
+  if (!hasJoined) {
+    return (
+      <div className="home-container">
+        <div className="home-card">
+          <h2 className="home-title">Join Room</h2>
+          <p className="home-subtitle">Enter your name to join the meeting</p>
+          <form onSubmit={handleJoin} className="action-container">
+            <div className="join-container">
+              <input
+                type="text"
+                placeholder="Your Name"
+                className="input-field"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+                autoFocus
+              />
+              <button type="submit" className="primary-btn">Join</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -321,9 +398,9 @@ const Room = () => {
             autoPlay 
             muted 
             playsInline 
-            style={{ transform: isScreenSharing ? 'none' : 'scaleX(-1)' }} // Mirror camera but not screen share
+            style={{ transform: isScreenSharing ? 'none' : 'scaleX(-1)' }} 
           />
-          <div className="video-label">You {isHost ? '(Host)' : ''}</div>
+          <div className="video-label">{username} {isOrganizer ? '(Host)' : ''}</div>
           <button 
             className={`pin-btn ${pinnedId === 'local' ? 'pinned' : ''}`}
             onClick={() => setPinnedId(pinnedId === 'local' ? null : 'local')}
@@ -339,6 +416,7 @@ const Room = () => {
             key={peerId} 
             peerId={peerId} 
             stream={stream} 
+            name={peerNames[peerId] || `User ${peerId.substring(0, 4)}`}
             isPinned={pinnedId === peerId}
             onPinToggle={() => setPinnedId(pinnedId === peerId ? null : peerId)}
           />
@@ -362,13 +440,15 @@ const Room = () => {
           {videoEnabled ? <VideoIcon size={24} /> : <VideoOff size={24} />}
         </button>
         
-        <button 
-          className={`control-btn ${isScreenSharing ? 'active' : ''}`} 
-          onClick={toggleScreenShare}
-          title="Share screen"
-        >
-          <MonitorUp size={24} />
-        </button>
+        {isOrganizer && (
+          <button 
+            className={`control-btn ${isScreenSharing ? 'active' : ''}`} 
+            onClick={toggleScreenShare}
+            title="Share screen"
+          >
+            <MonitorUp size={24} />
+          </button>
+        )}
         
         <button 
           className="control-btn danger" 
@@ -382,7 +462,7 @@ const Room = () => {
   );
 };
 
-const RemoteVideo = ({ peerId, stream, isPinned, onPinToggle }) => {
+const RemoteVideo = ({ peerId, stream, name, isPinned, onPinToggle }) => {
   const videoRef = useRef();
 
   useEffect(() => {
@@ -394,7 +474,7 @@ const RemoteVideo = ({ peerId, stream, isPinned, onPinToggle }) => {
   return (
     <div className={`video-wrapper ${isPinned ? 'main' : 'secondary'}`}>
       <video ref={videoRef} autoPlay playsInline />
-      <div className="video-label">User {peerId.substring(0, 4)}</div>
+      <div className="video-label">{name}</div>
       <button 
         className={`pin-btn ${isPinned ? 'pinned' : ''}`}
         onClick={onPinToggle}
