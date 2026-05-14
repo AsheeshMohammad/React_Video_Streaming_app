@@ -61,8 +61,16 @@ const Room = () => {
   const initializePeer = (stream) => {
     const hostId = `${roomId}-host`;
     
-    // Try to become the host
     const newPeer = new Peer(hostId, {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+        ]
+      },
       debug: 2
     });
 
@@ -77,8 +85,18 @@ const Room = () => {
     newPeer.on('error', (err) => {
       if (err.type === 'unavailable-id') {
         // Host already exists, join as guest
-        console.log('Host exists. Joining as guest...');
-        const guestPeer = new Peer({ debug: 2 });
+        const guestPeer = new Peer({
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:stun3.l.google.com:19302' },
+              { urls: 'stun:stun4.l.google.com:19302' },
+            ]
+          },
+          debug: 2 
+        });
         
         guestPeer.on('open', (id) => {
           console.log('Connected as Guest:', id);
