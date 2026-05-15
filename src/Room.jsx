@@ -1,7 +1,26 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Peer from 'peerjs';
-import { Mic, MicOff, Video as VideoIcon, VideoOff, MonitorUp, PhoneOff, Copy, Check, Pin, PinOff } from 'lucide-react';
+import { 
+  Box, 
+  Button, 
+  TextField, 
+  Typography, 
+  Paper, 
+  Container, 
+  IconButton, 
+  CircularProgress 
+} from '@mui/material';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import VideocamIcon from '@mui/icons-material/Videocam';
+import VideocamOffIcon from '@mui/icons-material/VideocamOff';
+import ScreenShareIcon from '@mui/icons-material/ScreenShare';
+import CallEndIcon from '@mui/icons-material/CallEnd';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import CheckIcon from '@mui/icons-material/Check';
+import PushPinIcon from '@mui/icons-material/PushPin';
+import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 
 const peerConfig = {
   config: {
@@ -20,8 +39,8 @@ const Room = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
 
-  const [username, setUsername] = useState('');
-  const [hasJoined, setHasJoined] = useState(false);
+  const [username, setUsername] = useState(() => sessionStorage.getItem(`username_${roomId}`) || '');
+  const [hasJoined, setHasJoined] = useState(() => sessionStorage.getItem(`joined_${roomId}`) === 'true');
 
   const [peer, setPeer] = useState(null);
   const [myStream, setMyStream] = useState(null);
@@ -38,6 +57,7 @@ const Room = () => {
 
   const myVideoRef = useRef();
   const peersRef = useRef({}); 
+  const connectionsRef = useRef({});
   const hostReconnectInterval = useRef(null);
 
   const isOrganizer = localStorage.getItem('organizer_' + roomId) === 'true';
@@ -133,14 +153,12 @@ const Room = () => {
       setLoading(false);
       setupPeerListeners(guestPeer, stream, false, currentUsername);
       
-      // Attempt to maintain connection to host
       maintainConnectionToHost(guestPeer, hostId, stream, currentUsername);
     });
 
     guestPeer.on('error', (err) => {
       console.error('Guest Peer error:', err);
       if (err.type === 'peer-unavailable') {
-        // The host we tried to call is offline. Allow interval to retry later.
         if (peersRef.current[hostId]) {
           delete peersRef.current[hostId];
         }
@@ -150,7 +168,7 @@ const Room = () => {
 
   const maintainConnectionToHost = (guestPeer, hostId, stream, currentUsername) => {
     const attemptConnection = () => {
-      if (peersRef.current[hostId]) return; // Already attempting or connected
+      if (peersRef.current[hostId]) return; 
       console.log('Attempting to connect to host...');
       connectToPeer(guestPeer, hostId, stream, currentUsername);
     };
@@ -185,13 +203,35 @@ const Room = () => {
       conn.on('data', (data) => {
         if (data.type === 'user-info') {
           setPeerNames(prev => ({ ...prev, [data.peerId]: data.username }));
+          
+          if (isCurrentHost) {
+            // Notify existing peers about this new guest
+            Object.values(connectionsRef.current).forEach(c => {
+              if (c.peer !== conn.peer && c.open) {
+                c.send({ type: 'new-guest', peerId: data.peerId });
+              }
+            });
+          }
         }
         if (data.type === 'new-guest' && !isCurrentHost) {
           connectToPeer(currentPeer, data.peerId, stream, currentUsername);
         }
       });
       conn.on('open', () => {
+         connectionsRef.current[conn.peer] = conn;
          conn.send({ type: 'user-info', username: currentUsername, peerId: currentPeer.id });
+         
+         if (isCurrentHost) {
+           // Tell the new guest about all existing peers
+           Object.keys(connectionsRef.current).forEach(existingPeerId => {
+             if (existingPeerId !== conn.peer && connectionsRef.current[existingPeerId].open) {
+               conn.send({ type: 'new-guest', peerId: existingPeerId });
+             }
+           });
+         }
+      });
+      conn.on('close', () => {
+        delete connectionsRef.current[conn.peer];
       });
     });
   };
@@ -202,7 +242,7 @@ const Room = () => {
     console.log('Calling', targetId);
     const call = currentPeer.call(targetId, stream, { metadata: { username: currentUsername } });
     
-    if (!call) return; // Might happen if peer disconnected right before
+    if (!call) return; 
 
     peersRef.current[targetId] = call;
     
@@ -218,16 +258,25 @@ const Room = () => {
     const conn = currentPeer.connect(targetId);
     if (conn) {
       conn.on('open', () => {
+        connectionsRef.current[conn.peer] = conn;
         conn.send({ type: 'user-info', username: currentUsername, peerId: currentPeer.id });
+      });
+      conn.on('data', (data) => {
+        if (data.type === 'user-info') {
+          setPeerNames(prev => ({ ...prev, [data.peerId]: data.username }));
+        }
+        if (data.type === 'new-guest') {
+          connectToPeer(currentPeer, data.peerId, stream, currentUsername);
+        }
+      });
+      conn.on('close', () => {
+        delete connectionsRef.current[conn.peer];
       });
     }
   };
 
   const addPeerStream = (peerId, stream) => {
-    setPeers(prev => ({
-      ...prev,
-      [peerId]: stream
-    }));
+    setPeers(prev => ({ ...prev, [peerId]: stream }));
   };
 
   const removePeerStream = (peerId) => {
@@ -262,8 +311,7 @@ const Room = () => {
     }
   };
 
-  const toggleScreenShare = async () => {
-    if (!isHost) return; 
+  const toggleScreenShare = async () => { 
     
     if (!isScreenSharing) {
       try {
@@ -326,6 +374,7 @@ const Room = () => {
     if (hostReconnectInterval.current) {
       clearInterval(hostReconnectInterval.current);
     }
+    sessionStorage.removeItem(`joined_${roomId}`);
     navigate('/');
   };
 
@@ -338,77 +387,110 @@ const Room = () => {
   const handleJoin = (e) => {
     e.preventDefault();
     if (username.trim()) {
+      sessionStorage.setItem(`username_${roomId}`, username.trim());
+      sessionStorage.setItem(`joined_${roomId}`, 'true');
       setHasJoined(true);
     }
   };
 
   if (!hasJoined) {
     return (
-      <div className="home-container">
-        <div className="home-card">
-          <h2 className="home-title">Join Room</h2>
-          <p className="home-subtitle">Enter your name to join the meeting</p>
-          <form onSubmit={handleJoin} className="action-container">
-            <div className="join-container">
-              <input
-                type="text"
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', bgcolor: '#0f1115', backgroundImage: 'radial-gradient(circle at top right, #1f2331, #0f1115)' }}>
+        <Container maxWidth="sm">
+          <Paper elevation={24} sx={{ p: 5, borderRadius: 4, textAlign: 'center', bgcolor: '#1c1f26', color: 'white', border: '1px solid #2e333d' }}>
+            <Typography variant="h4" component="h1" fontWeight="bold" sx={{ mb: 1, background: 'linear-gradient(90deg, #60a5fa, #3b82f6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              Join Room
+            </Typography>
+            <Typography variant="body1" sx={{ color: '#a0aab2', mb: 4 }}>
+              Enter your name to join the meeting
+            </Typography>
+            <form onSubmit={handleJoin} style={{ display: 'flex', gap: '8px' }}>
+              <TextField
+                fullWidth
+                variant="outlined"
                 placeholder="Your Name"
-                className="input-field"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
                 autoFocus
+                InputProps={{
+                  sx: { bgcolor: '#0f1115', color: 'white', '& fieldset': { borderColor: '#2e333d' }, '&:hover fieldset': { borderColor: '#3b82f6' } }
+                }}
               />
-              <button type="submit" className="primary-btn">Join</button>
-            </div>
-          </form>
-        </div>
-      </div>
+              <Button type="submit" variant="contained" sx={{ px: 4, borderRadius: 2, textTransform: 'none', bgcolor: '#3b82f6', '&:hover': { bgcolor: '#2563eb' } }}>
+                Join
+              </Button>
+            </form>
+          </Paper>
+        </Container>
+      </Box>
     );
   }
 
   if (loading) {
     return (
-      <div className="loading-container">
-        <div className="spinner"></div>
-        <p>Joining room...</p>
-      </div>
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', bgcolor: '#0f1115', color: '#a0aab2', gap: 2 }}>
+        <CircularProgress sx={{ color: '#3b82f6' }} />
+        <Typography>Joining room...</Typography>
+      </Box>
     );
   }
 
   return (
-    <div className="room-container">
-      <div className="room-header">
-        <div className="room-info">
-          <h2>MeetStream Room</h2>
-          <div className="room-id">
-            Code: {roomId}
-            <button onClick={copyRoomId} className="copy-btn" title="Copy code">
-              {copied ? <Check size={16} /> : <Copy size={16} />}
-            </button>
-          </div>
-        </div>
-      </div>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', bgcolor: '#0f1115' }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, bgcolor: '#1c1f26', borderBottom: '1px solid #2e333d' }}>
+        <Box>
+          <Typography variant="h6" fontWeight={600} color="white">
+            MeetStream Room
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#a0aab2' }}>
+            <Typography variant="body2">Code: {roomId}</Typography>
+            <IconButton onClick={copyRoomId} size="small" sx={{ color: '#3b82f6' }}>
+              {copied ? <CheckIcon fontSize="small" /> : <ContentCopyIcon fontSize="small" />}
+            </IconButton>
+          </Box>
+        </Box>
+      </Box>
 
-      <div className="video-grid">
+      <Box sx={{ flex: 1, display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 2, p: 2, overflow: 'auto' }}>
         {/* My Video */}
-        <div className={`video-wrapper ${isScreenSharing ? 'screen-share' : ''} ${pinnedId === 'local' || (pinnedId === null && Object.keys(peers).length === 0) ? 'main' : 'secondary'}`}>
+        <Box 
+          sx={{ 
+            position: 'relative', 
+            bgcolor: '#1c1f26', 
+            borderRadius: 3, 
+            overflow: 'hidden', 
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)', 
+            display: 'flex', 
+            justifyContent: 'center', 
+            alignItems: 'center', 
+            transition: 'all 0.3s ease',
+            minWidth: 300, 
+            minHeight: 200,
+            flex: pinnedId === 'local' || (pinnedId === null && Object.keys(peers).length === 0) ? '2 1 600px' : '1 1 300px',
+            maxWidth: pinnedId === 'local' || (pinnedId === null && Object.keys(peers).length === 0) ? 'calc(100% - 2rem)' : 400,
+            maxHeight: pinnedId === 'local' || (pinnedId === null && Object.keys(peers).length === 0) ? 'calc(100% - 2rem)' : 300,
+            '&:hover .pin-btn': { opacity: 1 }
+          }}
+        >
           <video 
             ref={myVideoRef} 
             autoPlay 
             muted 
             playsInline 
-            style={{ transform: isScreenSharing ? 'none' : 'scaleX(-1)' }} 
+            style={{ width: '100%', height: '100%', objectFit: isScreenSharing ? 'contain' : 'cover', transform: isScreenSharing ? 'none' : 'scaleX(-1)' }} 
           />
-          <div className="video-label">{username} {isOrganizer ? '(Host)' : ''}</div>
-          <button 
-            className={`pin-btn ${pinnedId === 'local' ? 'pinned' : ''}`}
+          <Box sx={{ position: 'absolute', bottom: 16, left: 16, bgcolor: 'rgba(0,0,0,0.6)', px: 1.5, py: 0.5, borderRadius: 1, color: 'white', backdropFilter: 'blur(4px)' }}>
+            <Typography variant="body2">{username} {isOrganizer ? '(Host)' : ''}</Typography>
+          </Box>
+          <IconButton 
+            className="pin-btn"
             onClick={() => setPinnedId(pinnedId === 'local' ? null : 'local')}
-            title={pinnedId === 'local' ? "Unpin" : "Pin"}
+            sx={{ position: 'absolute', top: 16, right: 16, bgcolor: pinnedId === 'local' ? '#3b82f6' : 'rgba(0,0,0,0.6)', color: 'white', opacity: pinnedId === 'local' ? 1 : 0, transition: 'all 0.2s', '&:hover': { bgcolor: '#3b82f6' } }}
           >
-            {pinnedId === 'local' ? <PinOff size={16} /> : <Pin size={16} />}
-          </button>
-        </div>
+            {pinnedId === 'local' ? <PushPinOutlinedIcon fontSize="small" /> : <PushPinIcon fontSize="small" />}
+          </IconButton>
+        </Box>
 
         {/* Remote Videos */}
         {Object.entries(peers).map(([peerId, stream]) => (
@@ -421,44 +503,38 @@ const Room = () => {
             onPinToggle={() => setPinnedId(pinnedId === peerId ? null : peerId)}
           />
         ))}
-      </div>
+      </Box>
 
-      <div className="controls-container">
-        <button 
-          className={`control-btn ${!audioEnabled ? 'off' : ''}`} 
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, p: 3, bgcolor: '#1c1f26', borderTop: '1px solid #2e333d' }}>
+        <IconButton 
           onClick={toggleAudio}
-          title={audioEnabled ? 'Mute' : 'Unmute'}
+          sx={{ width: 56, height: 56, bgcolor: audioEnabled ? '#2e333d' : '#ef4444', color: 'white', '&:hover': { bgcolor: audioEnabled ? '#404756' : '#dc2626' } }}
         >
-          {audioEnabled ? <Mic size={24} /> : <MicOff size={24} />}
-        </button>
+          {audioEnabled ? <MicIcon /> : <MicOffIcon />}
+        </IconButton>
         
-        <button 
-          className={`control-btn ${!videoEnabled ? 'off' : ''}`} 
+        <IconButton 
           onClick={toggleVideo}
-          title={videoEnabled ? 'Turn off camera' : 'Turn on camera'}
+          sx={{ width: 56, height: 56, bgcolor: videoEnabled ? '#2e333d' : '#ef4444', color: 'white', '&:hover': { bgcolor: videoEnabled ? '#404756' : '#dc2626' } }}
         >
-          {videoEnabled ? <VideoIcon size={24} /> : <VideoOff size={24} />}
-        </button>
+          {videoEnabled ? <VideocamIcon /> : <VideocamOffIcon />}
+        </IconButton>
         
-        {isOrganizer && (
-          <button 
-            className={`control-btn ${isScreenSharing ? 'active' : ''}`} 
-            onClick={toggleScreenShare}
-            title="Share screen"
-          >
-            <MonitorUp size={24} />
-          </button>
-        )}
+        <IconButton 
+          onClick={toggleScreenShare}
+          sx={{ width: 56, height: 56, bgcolor: isScreenSharing ? 'rgba(59, 130, 246, 0.2)' : '#2e333d', color: isScreenSharing ? '#3b82f6' : 'white', '&:hover': { bgcolor: isScreenSharing ? 'rgba(59, 130, 246, 0.3)' : '#404756' } }}
+        >
+          <ScreenShareIcon />
+        </IconButton>
         
-        <button 
-          className="control-btn danger" 
+        <IconButton 
           onClick={leaveRoom}
-          title="Leave call"
+          sx={{ width: 56, height: 56, bgcolor: '#ef4444', color: 'white', '&:hover': { bgcolor: '#dc2626' } }}
         >
-          <PhoneOff size={24} />
-        </button>
-      </div>
-    </div>
+          <CallEndIcon />
+        </IconButton>
+      </Box>
+    </Box>
   );
 };
 
@@ -472,17 +548,37 @@ const RemoteVideo = ({ peerId, stream, name, isPinned, onPinToggle }) => {
   }, [stream]);
 
   return (
-    <div className={`video-wrapper ${isPinned ? 'main' : 'secondary'}`}>
-      <video ref={videoRef} autoPlay playsInline />
-      <div className="video-label">{name}</div>
-      <button 
-        className={`pin-btn ${isPinned ? 'pinned' : ''}`}
+    <Box 
+      sx={{ 
+        position: 'relative', 
+        bgcolor: '#1c1f26', 
+        borderRadius: 3, 
+        overflow: 'hidden', 
+        boxShadow: '0 4px 20px rgba(0,0,0,0.3)', 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        transition: 'all 0.3s ease',
+        minWidth: 300, 
+        minHeight: 200,
+        flex: isPinned ? '2 1 600px' : '1 1 300px',
+        maxWidth: isPinned ? 'calc(100% - 2rem)' : 400,
+        maxHeight: isPinned ? 'calc(100% - 2rem)' : 300,
+        '&:hover .pin-btn': { opacity: 1 }
+      }}
+    >
+      <video ref={videoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+      <Box sx={{ position: 'absolute', bottom: 16, left: 16, bgcolor: 'rgba(0,0,0,0.6)', px: 1.5, py: 0.5, borderRadius: 1, color: 'white', backdropFilter: 'blur(4px)' }}>
+        <Typography variant="body2">{name}</Typography>
+      </Box>
+      <IconButton 
+        className="pin-btn"
         onClick={onPinToggle}
-        title={isPinned ? "Unpin" : "Pin"}
+        sx={{ position: 'absolute', top: 16, right: 16, bgcolor: isPinned ? '#3b82f6' : 'rgba(0,0,0,0.6)', color: 'white', opacity: isPinned ? 1 : 0, transition: 'all 0.2s', '&:hover': { bgcolor: '#3b82f6' } }}
       >
-        {isPinned ? <PinOff size={16} /> : <Pin size={16} />}
-      </button>
-    </div>
+        {isPinned ? <PushPinOutlinedIcon fontSize="small" /> : <PushPinIcon fontSize="small" />}
+      </IconButton>
+    </Box>
   );
 };
 
